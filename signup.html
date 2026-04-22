@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Sign Up - ANIMIU</title>
+  <link rel="stylesheet" href="auth.css" />
+</head>
+<body>
+  <main class="auth-page">
+    <section class="auth-card">
+      <h1>Sign Up</h1>
+      <p class="auth-sub">Buat akun baru untuk menyimpan preferensi tontonan.</p>
+      <form id="signupForm">
+        <label>Nama</label>
+        <input id="signupName" type="text" required minlength="3" placeholder="nama kamu" />
+        <label>Email</label>
+        <input id="signupEmail" type="email" required placeholder="nama@email.com" />
+        <label>Password</label>
+        <input id="signupPassword" type="password" required minlength="6" placeholder="minimal 6 karakter" />
+        <button type="submit">Buat Akun</button>
+      </form>
+      <p id="authMessage" class="auth-message"></p>
+      <p class="auth-link">Sudah punya akun? <a href="login.html">Login</a></p>
+      <p class="auth-link"><a href="index.html">Kembali ke Home</a></p>
+    </section>
+  </main>
+  <script src="auth.js"></script>
+</body>
+</html>

@@ -407,8 +407,8 @@ const animeList = [
   },
 ];
 
-const hotAnimes = animeList.slice(0,5);
-const popularAnimes = animeList.slice(8,13);
+const hotAnimes = animeList.slice(0, 4);
+const popularAnimes = animeList.slice(8, 12);
 const content = document.getElementById('content');
 
 /* localStorage keys */
@@ -417,12 +417,35 @@ const KEY_HISTORY = 'watchHistory';
 const KEY_WATCHLIST = 'animiu_watchlist';
 const KEY_THEME = 'animiu_theme';
 const KEY_PHOTO = 'animiu_userphoto';
+const KEY_SESSION = 'animiu_session';
+const HERO_INTERVAL_MS = 5000;
+let heroTimer = null;
 
 /* util */
 function qs(sel){return document.querySelector(sel)}
 function qsa(sel){return Array.from(document.querySelectorAll(sel))}
 function save(key,data){localStorage.setItem(key,JSON.stringify(data))}
 function load(key){try{return JSON.parse(localStorage.getItem(key))}catch(e){return null}}
+
+function initAuthCTA(){
+  const cta = qs('.auth-cta');
+  const session = load(KEY_SESSION);
+  if(!cta) return;
+  if(session?.name){
+    cta.textContent = session.name;
+    cta.href = '#';
+    cta.addEventListener('click', (e) => {
+      e.preventDefault();
+      if(confirm('Keluar dari akun saat ini?')){
+        localStorage.removeItem(KEY_SESSION);
+        location.reload();
+      }
+    });
+  }else{
+    cta.textContent = 'Login';
+    cta.href = 'login.html';
+  }
+}
 
 /* ============================
    Jadwal (local mapping)
@@ -446,22 +469,240 @@ function getToday() {
 /* ============================
    Render helpers
    ============================ */
+function getEpisodeCount(anime) {
+  if (Array.isArray(anime.episodes)) return anime.episodes.length;
+  return anime.tabs?.episodes || anime.episodes || 0;
+}
+
+function getAnimeStatus(anime) {
+  const total = getEpisodeCount(anime);
+  return total >= 24 ? 'Ongoing' : 'New';
+}
+
+function safeImagePath(path) {
+  const clean = (path || '').trim();
+  if (!clean) return '';
+  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('data:')) return clean;
+  if (clean.includes('/')) return clean;
+  return `poster/${clean}`;
+}
+
+function createPosterFallback(title = 'ANIMIU') {
+  const safeTitle = String(title).replace(/[<>&"]/g, '').slice(0, 28) || 'ANIMIU';
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 600'>
+    <defs>
+      <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+        <stop offset='0%' stop-color='#2f1454'/>
+        <stop offset='100%' stop-color='#6d35a6'/>
+      </linearGradient>
+    </defs>
+    <rect width='400' height='600' fill='url(#g)'/>
+    <rect x='20' y='20' width='360' height='560' rx='18' ry='18' fill='none' stroke='rgba(255,255,255,.3)'/>
+    <text x='200' y='300' fill='#f3e9ff' font-size='26' font-family='Arial, sans-serif' text-anchor='middle'>${safeTitle}</text>
+    <text x='200' y='338' fill='#d9c7ef' font-size='16' font-family='Arial, sans-serif' text-anchor='middle'>Poster belum tersedia</text>
+  </svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+function getPosterSrc(anime) {
+  const src = safeImagePath(anime?.img);
+  return src || createPosterFallback(anime?.title);
+}
+
+function renderEmptyState(container, message) {
+  container.innerHTML = `<div class="empty-state">${message}</div>`;
+}
+
 function renderAnimeList(list, containerId){
   const container = document.getElementById(containerId);
   if(!container) return;
   container.innerHTML = '';
+  if(!list.length){
+    renderEmptyState(container, 'Belum ada data untuk kategori ini.');
+    return;
+  }
   list.forEach(a=>{
     const card = document.createElement('div');
     card.className = 'anime-card';
     card.dataset.id = a.id;
-    card.innerHTML = `<img src="${a.img}" alt="${a.title}"><p>${a.title}</p>`;
+    card.innerHTML = `
+      <div class="card-poster-wrap">
+        <img src="${getPosterSrc(a)}" alt="${a.title}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='${createPosterFallback(
+          'ANIMIU'
+        )}'">
+        <span class="card-badge badge-rating">Rating ${a.rating || '-'}</span>
+        <span class="card-badge badge-status">${getAnimeStatus(a)}</span>
+      </div>
+      <div class="card-body">
+        <p class="card-title">${a.title}</p>
+        <p class="card-meta">${getEpisodeCount(a)} Episode</p>
+      </div>
+    `;
     container.appendChild(card);
   });
 }
 
+function renderSkeleton(containerId, count = 4){
+  const container = document.getElementById(containerId);
+  if(!container) return;
+  container.innerHTML = '';
+  for(let i = 0; i < count; i++){
+    const sk = document.createElement('div');
+    sk.className = 'skeleton-card';
+    container.appendChild(sk);
+  }
+}
+
+function getUniqueGenres() {
+  const genres = new Set();
+  animeList.forEach(a => {
+    (a.genre || '')
+      .split(',')
+      .map(g => g.trim())
+      .filter(Boolean)
+      .forEach(g => genres.add(g));
+  });
+  return Array.from(genres).sort((a, b) => a.localeCompare(b));
+}
+
+function sortAnimeList(list, sortBy) {
+  const result = [...list];
+  if (sortBy === 'rating') {
+    result.sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
+  } else if (sortBy === 'title') {
+    result.sort((a, b) => a.title.localeCompare(b.title));
+  } else {
+    result.sort((a, b) => a.id - b.id);
+  }
+  return result;
+}
+
+function applyHomeFilters(list) {
+  const keyword = (qs('#searchInput')?.value || '').trim().toLowerCase();
+  const selectedGenre = qs('#genreFilter')?.value || 'all';
+  const selectedStatus = qs('#statusFilter')?.value || 'all';
+  const selectedSort = qs('#sortFilter')?.value || 'default';
+
+  const filtered = list.filter(a => {
+    const matchKeyword = !keyword || a.title.toLowerCase().includes(keyword);
+    const matchGenre =
+      selectedGenre === 'all' || (a.genre || '').toLowerCase().includes(selectedGenre.toLowerCase());
+    const status = getAnimeStatus(a).toLowerCase();
+    const matchStatus = selectedStatus === 'all' || status === selectedStatus.toLowerCase();
+    return matchKeyword && matchGenre && matchStatus;
+  });
+
+  return sortAnimeList(filtered, selectedSort);
+}
+
+function buildRecommendations(){
+  const fav = load(KEY_FAV) || [];
+  const history = load(KEY_HISTORY) || [];
+  const source = fav.length ? fav : history;
+  if(!source.length) return animeList.slice(4, 8);
+
+  const pickedGenres = new Set();
+  source.forEach(a => {
+    (a.genre || '')
+      .split(',')
+      .map(g => g.trim().toLowerCase())
+      .filter(Boolean)
+      .forEach(g => pickedGenres.add(g));
+  });
+
+  const excludedIds = new Set(source.map(a => a.id));
+  const reco = animeList.filter(a =>
+    !excludedIds.has(a.id) &&
+    (a.genre || '')
+      .split(',')
+      .map(g => g.trim().toLowerCase())
+      .some(g => pickedGenres.has(g))
+  );
+
+  return reco.slice(0, 4);
+}
+
+function renderHeroSlide(anime){
+  const hero = qs('.hero-banner');
+  const title = qs('#heroTitle');
+  const sub = qs('#heroSub');
+  const kicker = qs('#heroKicker');
+  if(!hero || !title || !sub || !kicker || !anime) return;
+
+  kicker.textContent = 'Trending Sekarang';
+  title.textContent = anime.title;
+  sub.textContent = anime.desc || anime.tabs?.info || 'Anime pilihan minggu ini.';
+  hero.style.backgroundImage = `linear-gradient(120deg, rgba(26, 9, 56, 0.88), rgba(52, 20, 96, 0.88)), url("${getPosterSrc(anime)}")`;
+  hero.style.backgroundSize = 'cover';
+  hero.style.backgroundPosition = 'center';
+}
+
+function startHeroRotation(){
+  const hero = qs('.hero-banner');
+  if(!hero) return;
+  const slides = sortAnimeList([...animeList], 'rating').slice(0, 5);
+  if(!slides.length) return;
+
+  let idx = 0;
+  renderHeroSlide(slides[idx]);
+  if(heroTimer) clearInterval(heroTimer);
+  heroTimer = setInterval(() => {
+    idx = (idx + 1) % slides.length;
+    renderHeroSlide(slides[idx]);
+  }, HERO_INTERVAL_MS);
+}
+
+function stopHeroRotation(){
+  if(heroTimer){
+    clearInterval(heroTimer);
+    heroTimer = null;
+  }
+}
+
+function renderHomeSections() {
+  ['hotAnimes', 'popularAnimes', 'newReleases', 'topWeekly', 'continueWatching', 'recommendedForYou'].forEach(id => renderSkeleton(id));
+  const filteredHot = applyHomeFilters(hotAnimes);
+  const filteredPopular = applyHomeFilters(popularAnimes);
+  const newReleases = [...animeList].slice(-8).reverse().slice(0, 4);
+  const topWeekly = sortAnimeList([...animeList], 'rating').slice(0, 4);
+  const continueWatching = (load(KEY_HISTORY) || [])
+    .map(h => animeList.find(a => a.id === h.id))
+    .filter(Boolean)
+    .slice(0, 4);
+  const recommendations = buildRecommendations();
+
+  setTimeout(() => {
+    renderAnimeList(filteredHot, 'hotAnimes');
+    renderAnimeList(filteredPopular, 'popularAnimes');
+    renderAnimeList(newReleases, 'newReleases');
+    renderAnimeList(topWeekly, 'topWeekly');
+    renderAnimeList(continueWatching, 'continueWatching');
+    renderAnimeList(recommendations, 'recommendedForYou');
+  }, 180);
+}
+
+function setupHomeControls() {
+  const genreFilter = qs('#genreFilter');
+  if (genreFilter && !genreFilter.dataset.ready) {
+    const genres = getUniqueGenres();
+    genreFilter.innerHTML = `<option value="all">Semua Genre</option>${genres
+      .map(g => `<option value="${g}">${g}</option>`)
+      .join('')}`;
+    genreFilter.dataset.ready = '1';
+  }
+
+  ['#genreFilter', '#statusFilter', '#sortFilter'].forEach(sel => {
+    const el = qs(sel);
+    if (!el || el.dataset.bound) return;
+    el.addEventListener('change', renderHomeSections);
+    el.dataset.bound = '1';
+  });
+}
+
 /* initial render home */
-renderAnimeList(hotAnimes, 'hotAnimes');
-renderAnimeList(popularAnimes, 'popularAnimes');
+setupHomeControls();
+renderHomeSections();
+startHeroRotation();
 
 /* ============================
    Navigation (SPA style)
@@ -485,11 +726,11 @@ const pages = {
   folder: `<section><h2 style="text-align:center">FOLDER</h2>
             <div style="max-width:1000px;margin:12px auto">
               <div class="list-section">
-                <h3>❤️ Anime Favorit</h3>
+                <h3>Anime Favorit</h3>
                 <div id="favList"></div>
               </div>
               <div class="list-section">
-                <h3>🎬 Anime Akan Ditonton (Watchlist)</h3>
+                <h3>Anime Akan Ditonton (Watchlist)</h3>
                 <div id="watchlist"></div>
               </div>
             </div>
@@ -500,7 +741,7 @@ const pages = {
             <p id="userEmail"><b>kalau mau anime nya ada video asli nya, request aja dengan dm ke IG ini </b><a href="https://www.instagram.com/mdhnr19">@mdhnr19</a></a></p>
             <div class="profile-buttons">
       <div class="profile-buttons">
-    <button class="btn" id="changePhotoBtn">Ubah Foto Profil <3</button>
+    <button class="btn" id="changePhotoBtn">Ubah Foto Profil</button>
     <input type="file" id="profileFile" accept="image/*" style="display:none" />
     <button class="btn" id="toggleTheme">Ganti Tema</button>
     <button class="btn" id="contactCS">Customer Service</button>
@@ -517,20 +758,26 @@ navLinks.forEach(link=>{
     link.classList.add('active');
     const page = link.dataset.page;
     content.innerHTML = pages[page];
+    content.classList.remove('page-enter');
+    requestAnimationFrame(() => content.classList.add('page-enter'));
 
     // after page inserted to DOM, attach page-specific logic
     if(page==='home'){
-      renderAnimeList(hotAnimes,'hotAnimes');
-      renderAnimeList(popularAnimes,'popularAnimes');
+      setupHomeControls();
+      renderHomeSections();
+      startHeroRotation();
     } 
     else if(page==='folder'){
+      stopHeroRotation();
       renderFolder();
     } 
     else if(page==='profil'){
+      stopHeroRotation();
       loadProfilePage();
       updateWatchHistory();
     } 
     else if(page==='jadwal'){
+      stopHeroRotation();
       // attach hari button handlers and render today
       // give DOM a micro-tick to ensure elements exist
       setTimeout(()=>{
@@ -585,12 +832,12 @@ function showAnimeDetail(a){
 
       <div class="tab-section" data-tab="info">
         <h2>${a.title}</h2>
-        <img src="${a.img}" alt="${a.title}" />
-        <div class="meta">⭐ ${a.rating} | 🎭 ${a.genre}</div>
+        <img src="${getPosterSrc(a)}" alt="${a.title}" onerror="this.onerror=null;this.src='${createPosterFallback('ANIMIU')}'" />
+        <div class="meta">Rating ${a.rating} | Genre ${a.genre}</div>
         <p>${a.tabs.info || a.desc}</p>
         <div style="margin-top:10px">
-          <button class="btn" id="favBtn">${inFav ? '❤️ Di Favorit' : '🤍 Tambahkan ke Favorit'}</button>
-          <button class="btn" id="watchBtn">${inWatch ? '✔ Sudah di List' : '🎞️ Masukan ke List'}</button>
+          <button class="btn" id="favBtn">${inFav ? 'Di Favorit' : 'Tambahkan ke Favorit'}</button>
+          <button class="btn" id="watchBtn">${inWatch ? 'Sudah di List' : 'Masukan ke List'}</button>
         </div>
       </div>
 
@@ -621,7 +868,7 @@ function showAnimeDetail(a){
       </div>
 
       <div style="margin-top:10px">
-        <button class="btn" id="backBtn">⬅ Kembali</button>
+        <button class="btn" id="backBtn">Kembali</button>
       </div>
     </section>
   `;
@@ -721,7 +968,11 @@ if(seasonContainer){
   (a.tabs.season || []).forEach(s=>{
     const el = document.createElement('div');
     el.className = 'season-card';
-    el.innerHTML = `<img src="${s.img}" alt="${s.title}" title="${s.title}" />
+    const seasonAnime = animeList.find(x => x.title.toLowerCase() === s.title.toLowerCase());
+    const seasonImgSrc = seasonAnime ? getPosterSrc(seasonAnime) : safeImagePath(s.img) || createPosterFallback(s.title);
+    el.innerHTML = `<img src="${seasonImgSrc}" alt="${s.title}" title="${s.title}" onerror="this.onerror=null;this.src='${createPosterFallback(
+      'ANIMIU'
+    )}'" />
                     <div style="text-align:center;margin-top:6px;font-weight:700">${s.title}</div>`;
     
     // Tambahkan klik untuk membuka detail anime season tersebut
@@ -784,15 +1035,14 @@ qs('#searchInput').addEventListener('input', () => {
       qs('#hotAnimes').parentElement.style.display = results.length > 0 ? 'none' : 'block';
       qs('#popularAnimes').parentElement.style.display = results.length > 0 ? 'none' : 'block';
       if (results.length === 0) {
-        qs('#searchResults').innerHTML = '<p style="grid-column:1/-1;text-align:center;color:var(--text)">Tidak ada anime ditemukan untuk "' + kw + '".</p>';
+        qs('#searchResults').innerHTML = `<div class="empty-state">Tidak ada anime ditemukan untuk "${kw}". Coba kata kunci lain.</div>`;
       }
     } else {
       const searchSection = qs('.anime-section:has(#searchResults)');
       if (searchSection) searchSection.remove();
       qs('#hotAnimes').parentElement.style.display = 'block';
       qs('#popularAnimes').parentElement.style.display = 'block';
-      renderAnimeList(hotAnimes, 'hotAnimes');
-      renderAnimeList(popularAnimes, 'popularAnimes');
+      renderHomeSections();
     }
   }, 300);
 });
@@ -909,9 +1159,12 @@ function addToHistory(a) {
    Profile page
    ============================ */
 function loadProfilePage(){
+  const session = load(KEY_SESSION);
   const photo = localStorage.getItem(KEY_PHOTO);
   const userPhoto = qs('#userPhoto');
   if(userPhoto) userPhoto.src = photo || 'PP.jpg';
+  if(session?.name) qs('#userName').textContent = `Welcome, ${session.name}`;
+  if(session?.email) qs('#userEmail').innerHTML = `<b>${session.email}</b>`;
 
   qs('#toggleTheme').addEventListener('click',()=> toggleTheme());
   qs('#changePhotoBtn').addEventListener('click', ()=> qs('#profileFile').click());
@@ -966,15 +1219,20 @@ function handleProfileFile(e){
    Theme handling
    ============================ */
 function applyThemeOnLoad(){
-  const t = localStorage.getItem(KEY_THEME);
-  if(t === 'light') document.body.classList.add('light');
+  const t = localStorage.getItem(KEY_THEME) || 'dark';
+  document.body.dataset.theme = t;
 }
 function toggleTheme(){
-  document.body.classList.toggle('light');
-  const now = document.body.classList.contains('light') ? 'light' : 'dark';
-  localStorage.setItem(KEY_THEME, now);
+  const themes = ['dark', 'light', 'sunset'];
+  const current = document.body.dataset.theme || 'dark';
+  const idx = themes.indexOf(current);
+  const next = themes[(idx + 1) % themes.length];
+  document.body.dataset.theme = next;
+  localStorage.setItem(KEY_THEME, next);
+  showNotif(`Tema aktif: ${next}`);
 }
 applyThemeOnLoad();
+initAuthCTA();
 
 /* ============================
    Helper: current page
@@ -1014,7 +1272,9 @@ function renderJadwal(day){
       const card = document.createElement('div');
       card.className = 'anime-card';
       card.dataset.id = a.id;
-      card.innerHTML = `<img src="${a.img}" alt="${a.title}"><p>${a.title}</p>`;
+      card.innerHTML = `<img src="${getPosterSrc(a)}" alt="${a.title}" onerror="this.onerror=null;this.src='${createPosterFallback(
+        'ANIMIU'
+      )}'"><p>${a.title}</p>`;
       container.appendChild(card);
     });
   },150);
